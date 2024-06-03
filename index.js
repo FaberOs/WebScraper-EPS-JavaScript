@@ -1,80 +1,143 @@
-import puppeteer from "puppeteer";
-import fetch from "node-fetch";
-import anticaptchaoficial from "@antiadmin/anticaptchaofficial";
+const { Builder, By, until } = require("selenium-webdriver");
+const edge = require("selenium-webdriver/edge");
+const axios = require("axios");
+const fs = require("fs");
+const https = require("https");
+const ac = require("@antiadmin/anticaptchaofficial");
+
+ac.setAPIKey("7a7cc7e7d44f7c6139028cbfacc4f900");
 
 const API_KEY = "5c19ecd4c4c6bbb9c8633fd450f76f66";
 const URL = "https://www.adres.gov.co/consulte-su-eps";
-const ANTI_CAPTCHA_KEY = "7a7cc7e7d44f7c6139028cbfacc4f900";
 
-// Configurar AntiCaptcha
-anticaptchaoficial.setAPIKey(ANTI_CAPTCHA_KEY);
+async function scrapeEPS() {
+  // Configurar el WebDriver de Edge
+  const options = new edge.Options();
 
-(async () => {
-  // Fetch con ScraperAPI
+  const driver = new Builder()
+    .forBrowser("MicrosoftEdge")
+    .setEdgeOptions(options)
+    .build();
+
   try {
-    const response = await fetch(
+    console.log("Fetching page using ScraperAPI...");
+    const response = await axios.get(
       `http://api.scraperapi.com/?api_key=${API_KEY}&url=${URL}&render=true`
     );
-    if (!response.ok) throw new Error(`HTTP error! Status: ${response.status}`);
 
-    const html = await response.text();
+    // Manejar errores de respuesta
+    if (response.status !== 200) {
+      throw new Error(`HTTP error! Status: ${response.status}`);
+    }
+
+    const html = response.data;
     console.log("Página obtenida con éxito");
 
-    // Lanzar Puppeteer
-    const browser = await puppeteer.launch({ headless: false });
-    const page = await browser.newPage();
+    // Navegar a la URL
+    await driver.get(URL);
 
-    // Cargar el HTML obtenido por ScraperAPI
-    await page.setContent(html, { waitUntil: "domcontentloaded" });
+    // Esperar a que aparezca el iframe
+    console.log("Waiting for the iframe to appear");
+    await driver.wait(until.elementLocated(By.tagName("iframe")), 10000);
 
-    // Ingresar datos de identificación
+    // Cambiar al iframe
+    const iframeElement = await driver.findElement(By.tagName("iframe"));
+    await driver.switchTo().frame(iframeElement);
 
-    const selectTipoDoc = await page.waitForSelector("#tipoDoc");
-    const inputNumDoc = await page.waitForSelector("#textNumDoc");
+    // Esperar a que aparezcan los elementos del formulario
+    console.log("Waiting for the tipoDoc dropdown");
+    await driver.wait(until.elementLocated(By.id("tipoDoc")), 10000);
 
-    await selectTipoDoc.select("CC"); // Cambiar según el selector del sitio
-    await inputNumDoc.type("1006417460"); // Cambiar según el selector del sitio
+    // Seleccionar el tipo de documento
+    console.log("Selecting tipoDoc");
+    const tipoDocDropdown = await driver.findElement(By.id("tipoDoc"));
+    await tipoDocDropdown.click(); // Hacer clic para abrir el menú desplegable
+    await driver.wait(until.elementLocated(By.css('option[value="CC"]')), 5000); // Esperar a que aparezca la opción CC
+    const optionCC = await tipoDocDropdown.findElement(
+      By.css('option[value="CC"]')
+    ); // Seleccionar la opción CC
+    await optionCC.click();
 
-    // Resolver CAPTCHA
-    const captchaImg = await page.$("#Capcha_CaptchaImageUP"); // Cambiar según el selector del sitio
-    const captchaSrc = await captchaImg.screenshot({ encoding: "base64" });
+    // Ingresar el número de documento
+    console.log("Entering numDoc");
+    const numDocInput = await driver.findElement(By.id("txtNumDoc"));
+    await numDocInput.sendKeys("1006417460");
 
-    const captchaResult = await resolveCaptcha(captchaSrc);
-    await page.type("#Capcha_CaptchaTextBox", captchaResult); // Cambiar según el selector del sitio
+    // Obtener la URL de la imagen del captcha
+    console.log("Getting captcha image URL");
+    const captchaImage = await driver.findElement(
+      By.id("Capcha_CaptchaImageUP")
+    );
+    const captchaSrc = await captchaImage.getAttribute("src");
+
+    // Configurar Axios para ignorar la verificación del certificado SSL
+    const agent = new https.Agent({
+      rejectUnauthorized: false,
+    });
+
+    // Descargar la imagen del captcha usando axios
+    console.log("Downloading captcha image");
+    const captchaResponse = await axios({
+      url: captchaSrc,
+      responseType: "arraybuffer",
+      httpsAgent: agent,
+    });
+    fs.writeFileSync("captcha.png", captchaResponse.data);
+    console.log("Captcha image downloaded as captcha.png");
+
+    // Resolver captcha
+    const captcha = fs.readFileSync("captcha.png", { encoding: "base64" });
+    const text = await ac.solveImage(captcha, true);
+
+    // Ingresar el código captcha
+    console.log("Entering captcha code");
+    const captchaInput = await driver.findElement(
+      By.id("Capcha_CaptchaTextBox")
+    );
+    await captchaInput.sendKeys(text);
 
     // Hacer clic en el botón de consulta
-    await page.click("#btnConsultar"); // Cambiar según el selector del sitio
-    await page.waitForNavigation();
+    console.log("Clicking the consultar button");
+    const consultarBtn = await driver.findElement(By.id("btnConsultar"));
+    await consultarBtn.click();
 
-    // Guardar la página como PDF
-    await page.pdf({ path: "respuesta.pdf", format: "A4" });
-    console.log("Respuesta guardada como PDF");
+    // Esperar a que se abra una nueva pestaña con los resultados
+    await driver.sleep(3000); // Esperar un poco para asegurarnos de que la nueva pestaña se haya abierto correctamente
+    const handles = await driver.getAllWindowHandles();
+    await driver.switchTo().window(handles[1]); // Cambiar al manejador de la nueva pestaña
 
-    await browser.close();
+    // Esperar a que se cargue la nueva página de resultados
+    await driver.sleep(5000); // Esperar un tiempo suficiente para que se cargue la página (ajustar según sea necesario)
+
+    // Ejecutar JavaScript en la página para guardar como PDF y HTML
+    const savePDFScript = `
+      const pdfBlob = await fetch(window.location.href, { method: 'GET', credentials: 'include' }).then(response => response.blob());
+      const pdfURL = URL.createObjectURL(pdfBlob);
+      const a = document.createElement('a');
+      a.href = pdfURL;
+      a.download = 'resultados.pdf';
+      a.click();
+    `;
+    await driver.executeScript(savePDFScript);
+
+    const saveHTMLScript = `
+      const htmlContent = document.documentElement.outerHTML;
+      return htmlContent;
+    `;
+    const htmlContent = await driver.executeScript(saveHTMLScript);
+
+    // Guardar el HTML en un archivo
+    fs.writeFileSync("page.html", htmlContent);
+    console.log("Page saved as HTML");
+
+    console.log("Page saved as PDF and HTML");
+    // Procesar resultados (puedes agregar más lógica aquí según sea necesario)
   } catch (error) {
-    console.error("Error:", error);
+    console.error("Error:", error.message);
+  } finally {
+    // Cerrar el navegador
+    await driver.quit();
   }
-})();
-
-async function resolveCaptcha(base64Image) {
-  return new Promise((resolve, reject) => {
-    anticaptchaoficial.createImageToTextTask(
-      {
-        case: true,
-        body: base64Image,
-      },
-      function (err, taskId) {
-        if (err) return reject(err);
-
-        anticaptchaoficial.getTaskSolution(
-          taskId,
-          function (err, taskSolution) {
-            if (err) return reject(err);
-
-            resolve(taskSolution.text);
-          }
-        );
-      }
-    );
-  });
 }
+
+scrapeEPS();
