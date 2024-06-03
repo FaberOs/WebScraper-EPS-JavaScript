@@ -4,6 +4,7 @@ const axios = require("axios");
 const fs = require("fs");
 const https = require("https");
 const ac = require("@antiadmin/anticaptchaofficial");
+const puppeteer = require("puppeteer");
 
 ac.setAPIKey("7a7cc7e7d44f7c6139028cbfacc4f900");
 
@@ -13,6 +14,10 @@ const URL = "https://www.adres.gov.co/consulte-su-eps";
 async function scrapeEPS() {
   // Configurar el WebDriver de Edge
   const options = new edge.Options();
+  /* options.addArguments("--disable-gpu");
+  options.addArguments("--no-sandbox");
+  options.addArguments("--disable-dev-shm-usage");
+  options.addArguments("--disable-software-rasterizer"); */
 
   const driver = new Builder()
     .forBrowser("MicrosoftEdge")
@@ -37,19 +42,19 @@ async function scrapeEPS() {
     await driver.get(URL);
 
     // Esperar a que aparezca el iframe
-    console.log("Waiting for the iframe to appear");
-    await driver.wait(until.elementLocated(By.tagName("iframe")), 10000);
+    console.log("Esperando que se genere el IFrame");
+    await driver.wait(until.elementLocated(By.tagName("iframe")), 5000);
 
     // Cambiar al iframe
     const iframeElement = await driver.findElement(By.tagName("iframe"));
     await driver.switchTo().frame(iframeElement);
 
     // Esperar a que aparezcan los elementos del formulario
-    console.log("Waiting for the tipoDoc dropdown");
-    await driver.wait(until.elementLocated(By.id("tipoDoc")), 10000);
+    console.log("Esperando por el dropdown tipoDoc");
+    await driver.wait(until.elementLocated(By.id("tipoDoc")), 5000);
 
     // Seleccionar el tipo de documento
-    console.log("Selecting tipoDoc");
+    console.log("Seleccionando tipoDoc");
     const tipoDocDropdown = await driver.findElement(By.id("tipoDoc"));
     await tipoDocDropdown.click(); // Hacer clic para abrir el menú desplegable
     await driver.wait(until.elementLocated(By.css('option[value="CC"]')), 5000); // Esperar a que aparezca la opción CC
@@ -59,12 +64,12 @@ async function scrapeEPS() {
     await optionCC.click();
 
     // Ingresar el número de documento
-    console.log("Entering numDoc");
+    console.log("Ingresando el numDoc");
     const numDocInput = await driver.findElement(By.id("txtNumDoc"));
     await numDocInput.sendKeys("1006417460");
 
     // Obtener la URL de la imagen del captcha
-    console.log("Getting captcha image URL");
+    console.log("Obteniendo la URL de la imagen CAPTCHA");
     const captchaImage = await driver.findElement(
       By.id("Capcha_CaptchaImageUP")
     );
@@ -76,28 +81,28 @@ async function scrapeEPS() {
     });
 
     // Descargar la imagen del captcha usando axios
-    console.log("Downloading captcha image");
+    console.log("Descargando imagen CAPTCHA");
     const captchaResponse = await axios({
       url: captchaSrc,
       responseType: "arraybuffer",
       httpsAgent: agent,
     });
     fs.writeFileSync("captcha.png", captchaResponse.data);
-    console.log("Captcha image downloaded as captcha.png");
+    console.log("Imagen CAPTCHA descargada como: captcha.png");
 
     // Resolver captcha
     const captcha = fs.readFileSync("captcha.png", { encoding: "base64" });
     const text = await ac.solveImage(captcha, true);
 
     // Ingresar el código captcha
-    console.log("Entering captcha code");
+    console.log("Ingresando el codigo del CAPTCHA");
     const captchaInput = await driver.findElement(
       By.id("Capcha_CaptchaTextBox")
     );
     await captchaInput.sendKeys(text);
 
     // Hacer clic en el botón de consulta
-    console.log("Clicking the consultar button");
+    console.log("Oprimiendo el boton de Consultar");
     const consultarBtn = await driver.findElement(By.id("btnConsultar"));
     await consultarBtn.click();
 
@@ -107,19 +112,9 @@ async function scrapeEPS() {
     await driver.switchTo().window(handles[1]); // Cambiar al manejador de la nueva pestaña
 
     // Esperar a que se cargue la nueva página de resultados
-    await driver.sleep(5000); // Esperar un tiempo suficiente para que se cargue la página (ajustar según sea necesario)
+    await driver.wait(until.elementLocated(By.tagName("body")), 10000); // Esperar a que se cargue la nueva página
 
-    // Ejecutar JavaScript en la página para guardar como PDF y HTML
-    const savePDFScript = `
-      const pdfBlob = await fetch(window.location.href, { method: 'GET', credentials: 'include' }).then(response => response.blob());
-      const pdfURL = URL.createObjectURL(pdfBlob);
-      const a = document.createElement('a');
-      a.href = pdfURL;
-      a.download = 'resultados.pdf';
-      a.click();
-    `;
-    await driver.executeScript(savePDFScript);
-
+    // Guardar la página como HTML
     const saveHTMLScript = `
       const htmlContent = document.documentElement.outerHTML;
       return htmlContent;
@@ -127,11 +122,47 @@ async function scrapeEPS() {
     const htmlContent = await driver.executeScript(saveHTMLScript);
 
     // Guardar el HTML en un archivo
-    fs.writeFileSync("page.html", htmlContent);
-    console.log("Page saved as HTML");
+    fs.writeFileSync("Consulta.html", htmlContent);
+    console.log("Consulta guardad como HTML");
 
-    console.log("Page saved as PDF and HTML");
-    // Procesar resultados (puedes agregar más lógica aquí según sea necesario)
+    // Obtener las cookies de la sesión actual
+    const cookies = await driver.manage().getCookies();
+
+    // Usar Puppeteer para guardar la página como PDF
+    const browser = await puppeteer.launch({
+      headless: true,
+      args: ["--no-sandbox", "--disable-setuid-sandbox"],
+    });
+    const page = await browser.newPage();
+
+    // Agregar encabezados de usuario
+    await page.setUserAgent(
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/90.0.4430.93 Safari/537.36"
+    );
+    await page.setExtraHTTPHeaders({
+      "Accept-Language": "en-US,en;q=0.9",
+    });
+
+    // Configurar las cookies en Puppeteer
+    const puppeteerCookies = cookies.map((cookie) => ({
+      name: cookie.name,
+      value: cookie.value,
+      domain: cookie.domain,
+      path: cookie.path,
+      expires: cookie.expiry,
+      httpOnly: cookie.httpOnly,
+      secure: cookie.secure,
+      sameSite: cookie.sameSite,
+    }));
+    await page.setCookie(...puppeteerCookies);
+
+    // Navegar a la URL de la página actual
+    const pageUrl = await driver.getCurrentUrl();
+    await page.goto(pageUrl, { waitUntil: "networkidle2" });
+    await page.pdf({ path: "Consulta.pdf", format: "A4" });
+    await browser.close();
+
+    console.log("Consulta guardada como PDF");
   } catch (error) {
     console.error("Error:", error.message);
   } finally {
